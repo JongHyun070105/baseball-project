@@ -1,0 +1,12 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+.vitest-attachments/
+coverage/
+*.tsbuildinfo
+tests/**/__screenshots__/
+.playwright-cli/
+output/
+.DS_Store
+*.log
