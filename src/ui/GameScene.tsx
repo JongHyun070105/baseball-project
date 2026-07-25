@@ -100,22 +100,27 @@ function Baseball({ state, mode }: { state?: BallState; mode: ActiveScene }) {
   useFrame(({ clock }) => {
     if (!ref.current) return
     if (state) {
+      // authoritative ball flight
+      ref.current.visible = true
       ref.current.position.set(
         state.position.x * 0.08,
         Math.max(0.12, state.position.y * 0.08 + 0.12),
         3 + state.position.z * 0.08
       )
     } else if (mode === 'batting' || mode === 'pitching') {
-      const progress = (clock.elapsedTime * 1.8) % 1
-      const pz = 8 - progress * 7.6
-      const py = 1.6 - Math.sin(progress * Math.PI) * 0.3
+      // idle pitch loop: mound(z=8) → home plate(z=0.4)
+      ref.current.visible = true
+      const progress = (clock.elapsedTime * 1.4) % 1
+      const pz = 8 - progress * 7.8
+      const py = 1.55 + Math.sin(progress * Math.PI) * 0.18
       ref.current.position.set(0, py, pz)
     } else {
-      ref.current.position.set(0, 0.12, 3)
+      // hide ball during fielding/baserunning when no authoritative state
+      ref.current.visible = false
     }
   })
   return (
-    <mesh ref={ref} position={[0, 1.25, 0.4]} castShadow>
+    <mesh ref={ref} position={[0, 1.6, 8]} castShadow>
       <sphereGeometry args={[0.085, 20, 20]} />
       <meshStandardMaterial color="#ffffff" roughness={0.5} emissive="#fffaed" emissiveIntensity={0.15} />
     </mesh>
@@ -159,51 +164,73 @@ function BroadcastCamera({ mode, motionEnabled, shake, ballState }: { mode: Acti
     const impact = motionEnabled ? Math.sin(clock.elapsedTime * 38) * shake * 0.08 : 0
     let targetX = 0
     let targetY = 2.0
-    let targetZ = -0.6
+    let targetZ = -3.5
     let lookX = 0
-    let lookY = 1.3
-    let lookZ = 16
+    let lookY = 1.4
+    let lookZ = 14
+    let lerpSpeed = 0.06
 
     if (mode === 'batting') {
-      // MLB The Show Behind-the-batter camera
-      targetX = 0.0 + (motionEnabled ? pointer.x * 0.2 : 0) + impact
-      targetY = 2.5 + (motionEnabled ? pointer.y * 0.1 : 0) + impact * 0.4
-      targetZ = -2.2
+      // MLB The Show: behind batter, offset left so catcher doesn't block
+      targetX = -0.6 + (motionEnabled ? pointer.x * 0.15 : 0) + impact
+      targetY = 2.2 + (motionEnabled ? pointer.y * 0.08 : 0) + impact * 0.3
+      targetZ = -3.8
       lookX = 0.0
-      lookY = 1.35
-      lookZ = 16
+      lookY = 1.3
+      lookZ = 14
+      lerpSpeed = 0.05
     } else if (mode === 'pitching') {
-      // Behind-the-pitcher camera
+      // Behind-the-pitcher camera looking toward home plate
       targetX = 0.0 + (motionEnabled ? pointer.x * 0.3 : 0) + impact
-      targetY = 2.4 + (motionEnabled ? pointer.y * 0.15 : 0)
-      targetZ = 16
+      targetY = 2.8 + (motionEnabled ? pointer.y * 0.15 : 0)
+      targetZ = 17
       lookX = 0.0
-      lookY = 1.0
+      lookY = 0.9
       lookZ = 0
+      lerpSpeed = 0.04
     } else if (ballState) {
       // Dynamic Ball Tracking Broadcast Camera
       const bx = ballState.position.x * 0.08
-      const by = Math.max(0.12, ballState.position.y * 0.08 + 0.12)
+      const by = Math.max(0.5, ballState.position.y * 0.08 + 0.12)
       const bz = 3 + ballState.position.z * 0.08
-      targetX = bx * 0.5 + 6.0
-      targetY = 8.0 + by * 0.4
-      targetZ = bz * 0.5 + 4.0
+      targetX = bx * 0.4 + 7.0
+      targetY = 7.5 + by * 0.3
+      targetZ = bz * 0.3 - 2.0
       lookX = bx
       lookY = by
       lookZ = bz
-    } else {
-      // Infield/Outfield default broadcast tracking
-      targetX = 6.5
-      targetY = 4.5
-      targetZ = 3.5
+      lerpSpeed = 0.08
+    } else if (mode === 'catcher') {
+      // Catcher POV: behind home plate looking toward mound
+      targetX = 0
+      targetY = 2.0
+      targetZ = -2.5
       lookX = 0
-      lookY = 1.5
-      lookZ = 6
+      lookY = 1.2
+      lookZ = 10
+    } else if (mode === 'infield' || mode === 'outfield') {
+      // Side broadcast angle showing full infield
+      targetX = 12
+      targetY = 6.5
+      targetZ = 6
+      lookX = 0
+      lookY = 0.5
+      lookZ = 8
+      lerpSpeed = 0.04
+    } else {
+      // Baserunning: wider overhead-side angle
+      targetX = 14
+      targetY = 8
+      targetZ = 10
+      lookX = 0
+      lookY = 0
+      lookZ = 8
+      lerpSpeed = 0.04
     }
 
-    camera.position.x += (targetX - camera.position.x) * 0.06
-    camera.position.y += (targetY - camera.position.y) * 0.06
-    camera.position.z += (targetZ - camera.position.z) * 0.06
+    camera.position.x += (targetX - camera.position.x) * lerpSpeed
+    camera.position.y += (targetY - camera.position.y) * lerpSpeed
+    camera.position.z += (targetZ - camera.position.z) * lerpSpeed
     camera.lookAt(lookX, lookY, lookZ)
   })
   return null
@@ -270,16 +297,16 @@ function GameWorld({ mode, paused, ballState, graphics, motionEnabled, cameraSha
       <RigidBody type="fixed" colliders="cuboid"><mesh position={[0, -.15, 10]} visible={false}><boxGeometry args={[110, .2, 110]} /><meshBasicMaterial transparent opacity={0} /></mesh></RigidBody>
     </Physics>
     <Stadium crowdCount={crowdCount} />
-    {/* Hitter at Batter Box */}
-    <Athlete position={[0.72, 0, 0.4]} uniform="#142f4c" pose="batting" scale={1.05} animated={motionEnabled && !paused} />
-    {/* Catcher behind Home Plate */}
-    <Athlete position={[0, 0, -1.1]} uniform="#72202a" pose="ready" scale={0.95} animated={motionEnabled && !paused} />
+    {/* Hitter stands right-handed in batter's box (camera is on 3rd base side, so slightly offset) */}
+    <Athlete position={[0.7, 0, 0.4]} uniform="#142f4c" pose="batting" scale={1.05} animated={motionEnabled && !paused} />
+    {/* Catcher placed further back so camera (at z=-3.8) doesn't see it as obstruction */}
+    {mode !== 'batting' && <Athlete position={[0, 0, -1.4]} uniform="#72202a" pose="ready" scale={0.92} animated={motionEnabled && !paused} />}
     {/* Pitcher on Pitching Mound */}
     <Athlete position={[0, 0, 8]} uniform="#72202a" pose="pitching" animated={motionEnabled && !paused} />
     {DEFENDERS.map((defender, index) => <Athlete key={index} position={defender} uniform="#72202a" scale={graphics === 'low' && index > 8 ? .82 : 1} animated={motionEnabled && !paused} />)}
     <Baseball state={ballState} mode={mode} />
     {mode === 'batting' && <StrikeZone aim={aim} />}
-    <ContactShadows position={[0, .09, 3]} opacity={.45} scale={18} blur={2.4} far={8} />
+    <ContactShadows position={[0, .09, 5]} opacity={.40} scale={22} blur={2.8} far={10} />
     <BroadcastCamera mode={mode} motionEnabled={motionEnabled} shake={cameraShake} ballState={ballState} />
   </>
 }
@@ -476,11 +503,12 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
     const current = matchRef.current
     const command = { id: current.lastCommandId + 1, tick: current.tick + 1, type, payload } as GameplayCommand
     const reduction = reduceMatch(current, command)
-    if (!onCheckpoint(reduction.state)) {
-      setFeedback('경기 체크포인트를 저장하지 못했습니다. 입력을 다시 시도하세요.')
-      return undefined
-    }
+    // Always update local match state so gameplay works even if autosave fails
     matchRef.current = reduction.state
+    if (!onCheckpoint(reduction.state)) {
+      // Don't block input, just warn — autosave may be temporarily unavailable
+      setFeedback('⚠️ 자동저장 실패 — 경기는 계속됩니다')
+    }
     const terminalEvent = reduction.events.find((event) => event.type === 'match/scene-terminal')
     return { state: reduction.state, ...(terminalEvent?.type === 'match/scene-terminal' ? { terminal: terminalEvent.payload } : {}) }
   }

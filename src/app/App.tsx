@@ -237,7 +237,7 @@ export function App() {
     }
   }
   const checkpointMatch = (state: MatchState): boolean => {
-    if (!career || career.save.phase !== 'in-game') return false
+    if (!career || (career.save.phase !== 'in-game' && career.save.phase !== 'pregame')) return false
     const checkpointed: CareerSimulation = {
       ...career,
       save: {
@@ -359,9 +359,17 @@ export function App() {
   const activeGame = useMemo(() => {
     if (!career || (career.save.phase !== 'pregame' && career.save.phase !== 'in-game')) return null
     const game = career.schedule.find((entry) => entry.monthIndex === career.save.month.index && !entry.resolved)
-    if (!game || !career.save.replayCheckpoint) return null
+    if (!game) return null
+    // Try to restore from checkpoint; if the checkpoint is corrupt/incompatible, start fresh
+    if (career.save.replayCheckpoint) {
+      try {
+        return restoreCareerMatch(career, game.id)
+      } catch {
+        // fall through to fresh start below
+      }
+    }
     try {
-      return restoreCareerMatch(career, game.id)
+      return createCareerMatch(career, game.id)
     } catch {
       return null
     }
