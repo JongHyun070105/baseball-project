@@ -368,12 +368,13 @@ function controlHints(mode: ActiveScene): { movementInput: string; movementActio
     return { movementInput: 'WASD · Shift', movementAction: '이동', playInput: 'Space · 1–4', playAction: '포구/송구' }
   }
   if (mode === 'baserunning') {
-    return { movementInput: 'W/S · Shift', movementAction: '주루', playInput: 'Enter · Space', playAction: '결정/슬라이딩' }
+    return { movementInput: 'W/S', movementAction: '진루/귀루', playInput: 'Enter · Space', playAction: '결정/슬라이딩' }
   }
   if (mode === 'pitching') {
-    return { movementInput: '마우스', movementAction: '조준', playInput: '클릭 유지·드래그·릴리스', playAction: '투구' }
+    return { movementInput: '마우스', movementAction: '코스 지정', playInput: '클릭 유지·드래그·릴리스', playAction: '투구' }
   }
-  return { movementInput: '마우스', movementAction: '조준', playInput: 'LMB/RMB/Space · B/T', playAction: '스윙' }
+  // batting (default for hitter)
+  return { movementInput: 'WASD · 마우스', movementAction: 'PCI 조준', playInput: 'LMB/RMB/Space', playAction: '스윙' }
 }
 
 export function fieldingSceneFor(position: HitterPosition): 'catcher' | 'infield' | 'outfield' {
@@ -474,8 +475,15 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
       setPresentationComplete(true)
       return
     }
-    if (result.scene === 'batting') setScene(result.success ? 'baserunning' : fieldingSceneFor(position as HitterPosition))
-    else if (matchRef.current.half === 'top') setScene('pitching')
+    if (result.scene === 'batting') {
+      if (result.success) {
+        // Hit! Go to baserunning
+        setScene('baserunning')
+      } else {
+        // Out — hitter never goes to fielding, just prepare next at-bat
+        continueHitterLoop(result.summary)
+      }
+    } else if (matchRef.current.half === 'top') setScene('pitching')
     else setPresentationComplete(true)
   }
   const continueHitterLoop = (previousSummary?: string) => {
@@ -486,18 +494,19 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
     let state = matchRef.current
     if (state.phase === 'live' && state.half === 'bottom') state = simulateAiPlateAppearance(state).state
     if (state.phase === 'live' && state.half === 'top') state = simulateAiHalfInning(state).state
-    if (!onCheckpoint(state)) { setFeedback('다음 타석 체크포인트를 저장하지 못했습니다.'); return }
+    // Always update local state; checkpoint failure is non-blocking
     matchRef.current = state
+    onCheckpoint(state)
     setScene('batting')
-    setFeedback(previousSummary ? `${previousSummary} · 다음 타석을 준비하세요.` : '팀 동료와 상대 공격이 끝났습니다. 다음 타석을 준비하세요.')
+    setFeedback(previousSummary ? `${previousSummary} · 다음 타석을 준비하세요.` : '다음 타석을 준비하세요.')
   }
   const recordPresentationTerminal = (result: SceneTerminalResult) => {
     completedRef.current = [...completedRef.current, result]
     setTerminal(result)
     setFeedback(result.summary)
     playAudioCue(settings.masterVolume, result.success)
-    if (result.scene === 'baserunning') setScene(fieldingSceneFor(position as HitterPosition))
-    else continueHitterLoop(result.summary)
+    // After baserunning ends, always go back to next at-bat (no fielding for hitter)
+    continueHitterLoop(result.summary)
   }
   const commitMatchCommand = (type: GameplayCommand['type'], payload: GameplayCommand['payload']): MatchCommit | undefined => {
     const current = matchRef.current
@@ -634,13 +643,30 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
       if (modeRef.current === 'pitching') {
         const selected = pitchingInputRef.current.selectPitch(event.key)
         if (selected) { setPitch(Number(event.key)); setFeedback(`${selected} 선택`) }
-      } else if (modeRef.current === 'batting') resolveBatting(mapBattingKey(event.key))
-      else if (modeRef.current === 'baserunning') resolveBaserunning(event.key)
-      else resolveFielding(event.key)
+      } else if (modeRef.current === 'batting') {
+        // WASD moves the PCI aim crosshair in batting mode
+        const k = event.key.toLowerCase()
+        if (k === 'a' || k === 'arrowleft') {
+          const next = { ...aimRef.current, x: Math.max(12, aimRef.current.x - 9) }
+          aimRef.current = next; setAim(next); return
+        }
+        if (k === 'd' || k === 'arrowright') {
+          const next = { ...aimRef.current, x: Math.min(88, aimRef.current.x + 9) }
+          aimRef.current = next; setAim(next); return
+        }
+        if (k === 'w' || k === 'arrowup') {
+          const next = { ...aimRef.current, y: Math.max(12, aimRef.current.y - 9) }
+          aimRef.current = next; setAim(next); return
+        }
+        if (k === 's' || k === 'arrowdown') {
+          const next = { ...aimRef.current, y: Math.min(88, aimRef.current.y + 9) }
+          aimRef.current = next; setAim(next); return
+        }
+        resolveBatting(mapBattingKey(event.key))
+      } else if (modeRef.current === 'baserunning') resolveBaserunning(event.key)
     }
     const onKeyUp = (event: KeyboardEvent) => {
       if (modeRef.current === 'baserunning') resolveBaserunning(event.key, true)
-      else if (modeRef.current === 'catcher' || modeRef.current === 'infield' || modeRef.current === 'outfield') resolveFielding(event.key, true)
     }
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
