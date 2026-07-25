@@ -1,4 +1,5 @@
-import { act, createElement } from 'react'
+import { createElement } from 'react'
+import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GameSettings, SceneTerminalResult } from '../../src/contracts'
@@ -15,6 +16,11 @@ vi.mock('@react-three/rapier', () => ({ Physics: ({ children }: { children?: unk
 import { fieldingSceneFor, GameScene, summarizeGameplay, type GameSceneResult } from '../../src/ui/GameScene'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+async function flush(callback: () => unknown): Promise<void> {
+  flushSync(callback)
+  await Promise.resolve()
+}
 
 const settings: GameSettings = {
   difficulty: 'prospect', aimAssist: true, cameraShake: .35,
@@ -41,7 +47,7 @@ describe('GameScene browser controls', () => {
       if (preview.lastPlay?.terminal?.success) { match = candidate; break }
     }
     const root = createRoot(host)
-    await act(async () => root.render(createElement(GameScene, {
+    await flush(() => root.render(createElement(GameScene, {
       role: 'hitter', position: 'SS', settings,
       match, onCheckpoint: () => true,
       onFinish: (result: GameSceneResult) => { finished.push(result) }, onExit: () => undefined,
@@ -50,16 +56,16 @@ describe('GameScene browser controls', () => {
     const scene = host.querySelector<HTMLElement>('[data-testid="game-screen"]')!
     const completePlateAppearance = async () => {
       for (let pitch = 0; pitch < 12 && scene.dataset.scene === 'batting'; pitch += 1) {
-        await act(async () => scene.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: innerWidth / 2, clientY: innerHeight / 2 })))
+        await flush(() => scene.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: innerWidth / 2, clientY: innerHeight / 2 })))
       }
       expect(scene.dataset.scene === 'baserunning' || scene.dataset.scene === 'infield').toBe(true)
-      if (scene.dataset.scene === 'baserunning') await act(async () => {
+      if (scene.dataset.scene === 'baserunning') await flush(() => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w' }))
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' }))
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Space' }))
       })
       expect(scene.dataset.scene).toBe('infield')
-      await act(async () => {
+      await flush(() => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w' }))
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Space' }))
         window.dispatchEvent(new KeyboardEvent('keydown', { key: '2' }))
@@ -76,13 +82,13 @@ describe('GameScene browser controls', () => {
     expect(terminal.dataset.terminalId).toMatch(/^browser-game:terminal:\d+$/)
     expect(terminal.dataset.replayHash).toMatch(/^[0-9a-f]{8}$/)
 
-    await act(async () => (host.querySelector('[data-testid="finish-game-button"]') as HTMLButtonElement).click())
+    await flush(() => (host.querySelector('[data-testid="finish-game-button"]') as HTMLButtonElement).click())
     expect(finished).toHaveLength(1)
     expect(finished[0].completedScenes.filter((result) => result.scene === 'batting')).toHaveLength(3)
     expect(finished[0].matchState.phase).toBe('terminal')
     expect(finished[0].replay.commands.map((command) => command.type)).toEqual(expect.arrayContaining(['gameplay/runner-decision', 'gameplay/move-fielder', 'gameplay/throw-base']))
     expect(finished[0].performance).toBeGreaterThan(0)
-    await act(async () => root.unmount())
+    await flush(() => root.unmount())
   })
 
   it('produces stable aggregate hashes and distinguishes runs from outs', () => {
@@ -105,16 +111,16 @@ describe('GameScene browser controls', () => {
     const host = document.createElement('div')
     document.body.append(host)
     const root = createRoot(host)
-    await act(async () => root.render(createElement(GameScene, {
+    await flush(() => root.render(createElement(GameScene, {
       role: 'pitcher', position: 'starter', settings, match: paused,
       onCheckpoint: (state: MatchState) => { checkpoints.push(state); return true },
       onFinish: () => undefined, onExit: () => undefined,
     })))
     expect(host.querySelector('[data-testid="game-screen"]')?.getAttribute('data-match-phase')).toBe('paused')
     expect(host.querySelector('.pause-overlay')).not.toBeNull()
-    await act(async () => (host.querySelector('button.button') as HTMLButtonElement).click())
+    await flush(() => (host.querySelector('button.button') as HTMLButtonElement).click())
     expect(checkpoints.at(-1)?.phase).toBe('live')
     expect(host.querySelector('.pause-overlay')).toBeNull()
-    await act(async () => root.unmount())
+    await flush(() => root.unmount())
   })
 })

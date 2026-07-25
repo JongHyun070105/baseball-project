@@ -2,7 +2,7 @@ import type { SchoolProfile } from './content'
 import type { Difficulty, HitterPosition, PitcherRole, PlayerRole } from './gameplay'
 import type { ReplayBundle } from './replay'
 
-export const SAVE_SCHEMA_VERSION = 3 as const
+export const SAVE_SCHEMA_VERSION = 4 as const
 
 export interface PlayerRatings {
   contact: number

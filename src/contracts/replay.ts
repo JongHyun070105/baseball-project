@@ -1,6 +1,6 @@
 import type { BallState } from './gameplay'
 
-export const REPLAY_SCHEMA_VERSION = 2 as const
+export const REPLAY_SCHEMA_VERSION = 3 as const
 
 export interface ReplayCommand {
   id: number

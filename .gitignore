@@ -8,5 +8,6 @@ coverage/
 tests/**/__screenshots__/
 .playwright-cli/
 output/
+graphify-out/
 .DS_Store
 *.log

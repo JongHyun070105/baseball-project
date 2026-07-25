@@ -72,6 +72,15 @@ export interface MatchReplayState {
   checkpoints: ReplayCheckpoint[]
 }
 
+export interface FieldingDecisionState {
+  mode: 'catcher' | 'infield' | 'outfield' | null
+  x: number
+  z: number
+  distance: number
+  sprint: boolean
+  caught: boolean
+}
+
 export interface MatchState {
   id: string
   seed: number
@@ -92,6 +101,7 @@ export interface MatchState {
   terminalIds: string[]
   playerPlateAppearances: number
   eventSequence: number
+  fielding: FieldingDecisionState
   lastPlay?: PlayResolution
   replay: MatchReplayState
 }

@@ -4,7 +4,8 @@ import { SAVE_SCHEMA_VERSION } from '../contracts/save'
 import { PLAYABLE_SCHOOLS } from '../content/schools'
 import { calendarMonth, createCareerSchedule } from '../domain/career/schedule'
 import { stateHash } from '../domain/core/hash'
-import { replayMatch } from '../domain/match'
+import { createMatch, createReplayBundle, reduceMatch, replayMatch, startMatch, type MatchState } from '../domain/match'
+import type { GameplayCommand } from '../contracts/commands'
 
 export const SAVE_SLOT_COUNT = 3 as const
 export const MAX_SAVE_BYTES = 1024 * 1024
@@ -13,16 +14,6 @@ export type SaveSlot = 1 | 2 | 3
 
 type EnvelopeBody = Omit<SaveSlotEnvelope, 'checksum'>
 type EarlyCurrentEnvelopeBody = Omit<EnvelopeBody, 'backupChecksum'>
-
-interface LegacyReplayBundle extends Omit<ReplayBundle, 'schemaVersion' | 'initialCommandId'> {
-  schemaVersion: 1
-  initialCommandId?: number
-}
-
-interface LegacyV2CareerSave extends Omit<CareerSave, 'schemaVersion' | 'replayCheckpoint'> {
-  schemaVersion: 2
-  replayCheckpoint: LegacyReplayBundle | ReplayBundle | null
-}
 
 interface LegacyCareerSave extends Omit<CareerSave, 'schemaVersion' | 'lastAppliedCommandId' | 'lastTerminalEventId' | 'appliedTerminalEventIds' | 'resolvedGames'> {
   schemaVersion: 0 | 1
@@ -112,7 +103,8 @@ export class SaveRepository {
     const parsed = parseJson(serialized)
     if (!isRecord(parsed) || !Number.isInteger(parsed.schemaVersion)) malformed('Save envelope is malformed')
 
-    if (parsed.schemaVersion !== SAVE_SCHEMA_VERSION || !('backupChecksum' in parsed)) {
+    const hasIndependentBackup = 'backupChecksum' in parsed && (parsed.schemaVersion === 2 || parsed.schemaVersion === 3 || parsed.schemaVersion === SAVE_SCHEMA_VERSION)
+    if (!hasIndependentBackup) {
       const envelope = this.#decode(serialized)
       if (envelope.backup === null) throw new SaveRepositoryError('missing-slot', `Save slot ${slot} has no backup`)
       return envelope.backup
@@ -121,8 +113,11 @@ export class SaveRepository {
     if (typeof parsed.backupChecksum !== 'string' || saveChecksum(parsed.backup) !== parsed.backupChecksum) {
       throw new SaveRepositoryError('checksum-mismatch', 'Backup checksum does not match its contents')
     }
-    assertCareerSave(parsed.backup)
-    return parsed.backup
+    const backup = parsed.schemaVersion === SAVE_SCHEMA_VERSION
+      ? parsed.backup as unknown as CareerSave
+      : migrateVersionedCareer(parsed.backup, parsed.schemaVersion as 2 | 3)
+    assertCareerSave(backup)
+    return backup
   }
 
   /** Replaces a corrupt current save only after independently authenticating its backup. */
@@ -198,7 +193,9 @@ export class SaveRepository {
       throw new SaveRepositoryError('malformed', 'Save envelope is malformed')
     }
     if (parsed.schemaVersion === 0 || parsed.schemaVersion === 1) return migrateLegacyEnvelope(parsed)
-    if (parsed.schemaVersion === 2) return migrateV2Envelope(parsed)
+    if (parsed.schemaVersion === 2 || parsed.schemaVersion === 3) {
+      return migrateVersionedEnvelope(parsed, parsed.schemaVersion)
+    }
     if (parsed.schemaVersion !== SAVE_SCHEMA_VERSION) {
       throw new SaveRepositoryError('unsupported-version', `Unsupported save version: ${String(parsed.schemaVersion)}`)
     }
@@ -298,27 +295,27 @@ function migrateLegacyEnvelope(value: Record<string, unknown>): SaveSlotEnvelope
   return { ...body, checksum: checksum(body) }
 }
 
-function migrateV2Envelope(value: Record<string, unknown>): SaveSlotEnvelope {
+function migrateVersionedEnvelope(value: Record<string, unknown>, schemaVersion: 2 | 3): SaveSlotEnvelope {
   if (!isRecord(value.current) || !(value.backup === null || isRecord(value.backup)) || typeof value.checksum !== 'string') {
-    throw new SaveRepositoryError('malformed', 'Version 2 save envelope is malformed')
+    throw new SaveRepositoryError('malformed', `Version ${schemaVersion} save envelope is malformed`)
   }
   const hasBackupChecksum = 'backupChecksum' in value
   const originalBody = hasBackupChecksum
-    ? { schemaVersion: 2, current: value.current, backup: value.backup, backupChecksum: value.backupChecksum }
-    : { schemaVersion: 2, current: value.current, backup: value.backup }
+    ? { schemaVersion, current: value.current, backup: value.backup, backupChecksum: value.backupChecksum }
+    : { schemaVersion, current: value.current, backup: value.backup }
   if (checksum(originalBody) !== value.checksum) {
-    throw new SaveRepositoryError('checksum-mismatch', 'Version 2 save checksum does not match its contents')
+    throw new SaveRepositoryError('checksum-mismatch', `Version ${schemaVersion} save checksum does not match its contents`)
   }
   if (hasBackupChecksum) {
     if (value.backup === null) {
       if (value.backupChecksum !== null) malformed('backupChecksum must be null without a backup')
     } else if (typeof value.backupChecksum !== 'string' || saveChecksum(value.backup) !== value.backupChecksum) {
-      throw new SaveRepositoryError('checksum-mismatch', 'Version 2 backup checksum does not match its contents')
+      throw new SaveRepositoryError('checksum-mismatch', `Version ${schemaVersion} backup checksum does not match its contents`)
     }
   }
 
-  const current = migrateV2Career(value.current as unknown as LegacyV2CareerSave)
-  const backup = value.backup === null ? null : migrateV2Career(value.backup as unknown as LegacyV2CareerSave)
+  const current = migrateVersionedCareer(value.current, schemaVersion)
+  const backup = value.backup === null ? null : migrateVersionedCareer(value.backup, schemaVersion)
   assertCareerSave(current)
   if (backup !== null) assertCareerSave(backup)
   const body: EnvelopeBody = {
@@ -345,26 +342,105 @@ function migrateLegacyCareer(value: LegacyCareerSave): CareerSave {
   }
 }
 
-function migrateV2Career(value: LegacyV2CareerSave): CareerSave {
-  if (!isRecord(value) || value.schemaVersion !== 2) malformed('Version 2 career save is malformed')
+function migrateVersionedCareer(value: unknown, schemaVersion: 2 | 3): CareerSave {
+  if (!isRecord(value) || value.schemaVersion !== schemaVersion) malformed(`Version ${schemaVersion} career save is malformed`)
   return {
     ...value,
     schemaVersion: SAVE_SCHEMA_VERSION,
     replayCheckpoint: migrateReplayBundle(value.replayCheckpoint),
-  }
+  } as unknown as CareerSave
 }
 
 function migrateReplayBundle(value: unknown): ReplayBundle | null {
   if (value === null) return null
   if (!isRecord(value)) malformed('Legacy replayCheckpoint is invalid')
-  if (value.schemaVersion === 1) {
+  if (value.schemaVersion === 1 || value.schemaVersion === 2) {
     const initialCommandId = Number.isInteger(value.initialCommandId) && (value.initialCommandId as number) >= 0
       ? value.initialCommandId as number
       : 0
-    return { ...value, schemaVersion: REPLAY_SCHEMA_VERSION, initialCommandId } as unknown as ReplayBundle
+    return normalizeLegacyDecisionReplay({ ...value, schemaVersion: REPLAY_SCHEMA_VERSION, initialCommandId } as unknown as ReplayBundle)
   }
   if (value.schemaVersion === REPLAY_SCHEMA_VERSION) return value as unknown as ReplayBundle
   malformed('Legacy replayCheckpoint schemaVersion is unsupported')
+}
+
+/**
+ * c40bc78 stored presentation-produced `outcome` objects in replay commands.
+ * They are removed before validation and the authoritative replay is rebuilt from
+ * the raw input stream, so old local saves remain loadable without trusting UI
+ * result data.
+ */
+function normalizeLegacyDecisionReplay(bundle: ReplayBundle): ReplayBundle {
+  if (!bundle.commands.some((command) => isLegacyDecisionCommand(command.type))) return bundle
+  for (const command of bundle.commands) {
+    if (!hasLegacyDecisionOutcome(command)) continue
+    if (!isRecord(command.payload) || !isLegacyDecisionCommand(command.type) || !isLegacyDecisionOutcome(command.payload.outcome)) {
+      malformed('Legacy replayCheckpoint outcome is invalid')
+    }
+  }
+  const gameId = replayGameIdFromBundle(bundle)
+  if (gameId === null) malformed('Legacy replayCheckpoint has no match identity')
+  const commands = bundle.commands.map(upgradeLegacyDecisionCommand)
+  if (!commands.every(isReplayCommand)) malformed('Legacy replayCheckpoint commands are invalid')
+
+  let state: MatchState = startMatch(createMatch({
+    id: gameId,
+    seed: bundle.seeds.career,
+    innings: 1,
+    playerTeam: 'home',
+    initialCommandId: bundle.initialCommandId,
+  })).state
+  for (const command of commands) state = reduceMatch(state, command as GameplayCommand).state
+  return createReplayBundle(state, bundle.buildVersion)
+}
+
+function hasLegacyDecisionOutcome(command: ReplayBundle['commands'][number]): boolean {
+  return isRecord(command.payload) && 'outcome' in command.payload
+}
+
+function isLegacyDecisionCommand(type: string): boolean {
+  return type === 'gameplay/move-fielder' || type === 'gameplay/throw-base' || type === 'gameplay/runner-decision'
+}
+
+function isLegacyDecisionOutcome(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.success === 'boolean' &&
+    Number.isInteger(value.runs) && (value.runs as number) >= 0 &&
+    Number.isInteger(value.outs) && (value.outs as number) >= 0 &&
+    typeof value.summary === 'string' && value.summary.length > 0
+}
+
+function upgradeLegacyDecisionCommand(command: ReplayBundle['commands'][number]): ReplayBundle['commands'][number] {
+  if (!isRecord(command.payload) || !isLegacyDecisionCommand(command.type)) return command
+  const payload = { ...command.payload }
+  const attempt = 'outcome' in payload
+  delete payload.outcome
+  if (command.type === 'gameplay/move-fielder' && (payload.mode === 'catcher' || payload.mode === 'outfield')) {
+    return { ...command, payload: { ...payload, ...(attempt ? { catchAttempt: true } : {}) } }
+  }
+  if (command.type === 'gameplay/throw-base') return { ...command, payload: { base: payload.base, attempt } }
+  if (command.type === 'gameplay/runner-decision') {
+    return {
+      ...command,
+      payload: {
+        direction: payload.direction,
+        sprint: payload.sprint,
+        slide: payload.slide,
+        attempt,
+      },
+    }
+  }
+  return { ...command, payload }
+}
+
+function replayGameIdFromBundle(bundle: ReplayBundle): string | null {
+  for (const event of bundle.events) {
+    const marker = event.id.indexOf(':event:')
+    if (marker > 0) return event.id.slice(0, marker)
+    const terminalMarker = event.id.indexOf(':terminal:')
+    if (terminalMarker > 0) return event.id.slice(0, terminalMarker)
+  }
+  return null
 }
 
 function inferLegacyResolvedGames(value: LegacyCareerSave): CareerSave['resolvedGames'] {
@@ -605,15 +681,20 @@ function isReplayCommand(value: unknown): boolean {
     return isOneOf(payload.pitchType, ['four-seam', 'two-seam', 'changeup', 'slider', 'curveball']) && isAim(payload.target) && isUnit(payload.gestureAccuracy) && isUnit(payload.releaseAccuracy)
   }
   if (value.type === 'gameplay/move-fielder') {
-    return isOneOf(payload.mode, ['catcher', 'infield', 'outfield']) && isFiniteNumber(payload.x) && isFiniteNumber(payload.z) && typeof payload.sprint === 'boolean' && (payload.outcome === undefined || isDecisionOutcome(payload.outcome))
+    return hasOnlyKeys(payload, ['mode', 'x', 'z', 'sprint', 'catchAttempt']) &&
+      isOneOf(payload.mode, ['catcher', 'infield', 'outfield']) &&
+      isFiniteNumber(payload.x) && Math.abs(payload.x) <= 1 &&
+      isFiniteNumber(payload.z) && Math.abs(payload.z) <= 1 &&
+      typeof payload.sprint === 'boolean' &&
+      (payload.catchAttempt === undefined || typeof payload.catchAttempt === 'boolean')
   }
-  if (value.type === 'gameplay/throw-base') return [1, 2, 3, 4].includes(payload.base as number) && isUnit(payload.accuracy) && (payload.outcome === undefined || isDecisionOutcome(payload.outcome))
-  if (value.type === 'gameplay/runner-decision') return isOneOf(payload.direction, ['advance', 'retreat', 'hold']) && typeof payload.sprint === 'boolean' && typeof payload.slide === 'boolean' && (payload.outcome === undefined || isDecisionOutcome(payload.outcome))
+  if (value.type === 'gameplay/throw-base') return hasOnlyKeys(payload, ['base', 'attempt']) && [1, 2, 3, 4].includes(payload.base as number) && typeof payload.attempt === 'boolean'
+  if (value.type === 'gameplay/runner-decision') return hasOnlyKeys(payload, ['direction', 'sprint', 'slide', 'attempt']) && isOneOf(payload.direction, ['advance', 'retreat', 'hold']) && typeof payload.sprint === 'boolean' && typeof payload.slide === 'boolean' && typeof payload.attempt === 'boolean'
   return false
 }
 
-function isDecisionOutcome(value: unknown): boolean {
-  return isRecord(value) && typeof value.success === 'boolean' && isFiniteNumber(value.runs) && Number.isInteger(value.runs) && value.runs >= 0 && isFiniteNumber(value.outs) && Number.isInteger(value.outs) && value.outs >= 0 && typeof value.summary === 'string' && value.summary.length > 0
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key))
 }
 
 function isAim(value: unknown): boolean {

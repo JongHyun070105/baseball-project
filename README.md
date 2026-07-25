@@ -58,13 +58,13 @@ npm run setup:browsers
 - 타격: 마우스 조준, 좌클릭 일반 스윙, 우클릭 컨택, `Space` 파워, `B` 번트, `T` 타임
 - 투구: 숫자키 `1–5` 구종, 마우스 코스, 클릭 유지 후 릴리스
 - 수비: `WASD` 이동, `Shift` 전력 질주, `Space` 점프/다이빙, 숫자키 `1–4` 송구
-- 주루: `W/S` 진루/귀루, `Shift` 전력 질주, `Space` 슬라이딩, `Esc` 일시정지/계속
+- 주루: `W/S` 진루/귀루, `Shift` 전력 질주, `Enter` 결정, `Space` 슬라이딩 결정, `Esc` 일시정지/계속
 - 접근성: 운영체제의 모션 감소 설정과 게임 내 모션/카메라 흔들림 설정 지원
 
 - Mouse or trackpad: menu selection and in-game aiming
 - Batting: mouse aim, left-click normal, right-click contact, `Space` power, `B` bunt, `T` time
 - Pitching: `1–5` pitch selection, mouse target, click-hold then release
-- Fielding: `WASD`, `Shift` sprint, `Space` jump/dive, `1–4` throw; baserunning uses `W/S`, `Shift`, and `Space`
+- Fielding: `WASD`, `Shift` sprint, `Space` jump/dive, `1–4` throw; baserunning uses `W/S`, `Shift`, `Enter` to commit, and `Space` to commit with a slide
 - Accessibility: reduced-motion preference plus in-game motion and camera-shake settings
 
 ## 데이터와 에셋 / Data and assets

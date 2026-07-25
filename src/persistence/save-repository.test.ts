@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { CareerSave } from '../contracts/save'
+import { REPLAY_SCHEMA_VERSION } from '../contracts/replay'
+import { SAVE_SCHEMA_VERSION } from '../contracts/save'
 import { createCareerSchedule } from '../domain/career'
 import { stateHash } from '../domain/core/hash'
-import { createMatch, createReplayBundle, reduceMatch, simulateAiGame, startMatch } from '../domain/match'
+import { createMatch, createReplayBundle, reduceMatch, simulateAiGame, startMatch, type MatchState } from '../domain/match'
 import { MemoryStorage } from './memory-storage'
 import { MAX_SAVE_BYTES, SaveRepository, SaveRepositoryError } from './save-repository'
 
 function career(overrides: Partial<CareerSave> = {}): CareerSave {
   return {
-    schemaVersion: 3,
+    schemaVersion: SAVE_SCHEMA_VERSION,
     id: 'career-16',
     createdAt: '2026-07-24T00:00:00.000Z',
     updatedAt: '2026-07-24T00:00:00.000Z',
@@ -66,7 +68,7 @@ function expectCode(action: () => unknown, code: SaveRepositoryError['code']): v
 
 function serializedEnvelope(current: CareerSave, backup: CareerSave | null = null): string {
   const body = {
-    schemaVersion: 3,
+    schemaVersion: SAVE_SCHEMA_VERSION,
     current,
     backup,
     backupChecksum: backup === null ? null : stateHash(backup),
@@ -79,8 +81,8 @@ function completedReplayCareer(): CareerSave {
   const decision = reduceMatch(started, {
     id: 1,
     tick: 1,
-    type: 'gameplay/runner-decision',
-    payload: { direction: 'hold', sprint: false, slide: false, outcome: { success: true, runs: 0, outs: 0, summary: 'Runner holds the base' } },
+    type: 'gameplay/move-fielder',
+    payload: { mode: 'outfield', x: 0, z: 0, sprint: true, catchAttempt: true },
   }).state
   const match = simulateAiGame(decision).state
   const replay = createReplayBundle(match, 'test')
@@ -137,7 +139,7 @@ describe('SaveRepository', () => {
     const target = new SaveRepository(new MemoryStorage())
     const imported = target.import(3, serialized)
 
-    expect(imported.schemaVersion).toBe(3)
+    expect(imported.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
     expect(imported.current.player.name).toBe('portable')
     expect(target.export(3)).toBe(serialized)
   })
@@ -155,7 +157,7 @@ describe('SaveRepository', () => {
     corrupt.current.seed = 99
     expectCode(() => repository.import(2, JSON.stringify(corrupt)), 'checksum-mismatch')
 
-    const oversized = JSON.stringify({ schemaVersion: 3, padding: 'x'.repeat(MAX_SAVE_BYTES) })
+    const oversized = JSON.stringify({ schemaVersion: SAVE_SCHEMA_VERSION, padding: 'x'.repeat(MAX_SAVE_BYTES) })
     expectCode(() => repository.import(2, oversized), 'oversized')
   })
 
@@ -171,8 +173,8 @@ describe('SaveRepository', () => {
 
     const migrated = repository.import(1, legacy)
 
-    expect(migrated.schemaVersion).toBe(3)
-    expect(migrated.current.schemaVersion).toBe(3)
+    expect(migrated.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(migrated.current.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
     expect(migrated.current.lastAppliedCommandId).toBe(0)
     expect(migrated.current.lastTerminalEventId).toBeNull()
     expect(migrated.current.appliedTerminalEventIds).toEqual([])
@@ -307,6 +309,22 @@ describe('SaveRepository', () => {
     expectCode(() => repository.restoreBackup(1), 'checksum-mismatch')
   })
 
+  it('independently restores an authenticated schema-v3 backup when current is corrupt', () => {
+    const storage = new MemoryStorage()
+    const backup = { ...career({ player: { ...career().player, name: 'old-backup' } }), schemaVersion: 3 }
+    const current = { ...career({ player: { ...career().player, name: 'old-current' } }), schemaVersion: 3 }
+    const body = { schemaVersion: 3, current, backup, backupChecksum: stateHash(backup) }
+    const envelope = { ...body, checksum: stateHash(body) }
+    envelope.current.month = { ...envelope.current.month, index: 99 }
+    storage.setItem('diamond-road:save:1', JSON.stringify(envelope))
+    const repository = new SaveRepository(storage)
+
+    expect(repository.loadBackup(1).player.name).toBe('old-backup')
+    const restored = repository.restoreBackup(1)
+    expect(restored.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(restored.current.player.name).toBe('old-backup')
+  })
+
   it('normalizes a valid early-v2 envelope without an independent backup checksum', () => {
     const current = { ...career({ player: { ...career().player, name: 'old-v2' } }), schemaVersion: 2 }
     const backup = { ...career({ player: { ...career().player, name: 'old-backup' } }), schemaVersion: 2 }
@@ -315,8 +333,8 @@ describe('SaveRepository', () => {
 
     const migrated = repository.import(1, JSON.stringify({ ...body, checksum: stateHash(body) }))
 
-    expect(migrated.schemaVersion).toBe(3)
-    expect(migrated.current.schemaVersion).toBe(3)
+    expect(migrated.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(migrated.current.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
     expect(migrated.backupChecksum).toBe(stateHash(migrated.backup))
     expect(repository.loadBackup(1).player.name).toBe('old-backup')
   })
@@ -337,12 +355,128 @@ describe('SaveRepository', () => {
 
     const imported = repository.import(2, JSON.stringify({ ...body, checksum: stateHash(body) }))
 
-    expect(imported.schemaVersion).toBe(3)
-    expect(imported.current.schemaVersion).toBe(3)
-    expect(imported.current.replayCheckpoint?.schemaVersion).toBe(2)
+    expect(imported.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(imported.current.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(imported.current.replayCheckpoint?.schemaVersion).toBe(REPLAY_SCHEMA_VERSION)
     expect(imported.current.replayCheckpoint?.initialCommandId).toBe(0)
-    expect(imported.backup?.replayCheckpoint?.schemaVersion).toBe(2)
+    expect(imported.backup?.replayCheckpoint?.schemaVersion).toBe(REPLAY_SCHEMA_VERSION)
     expect(repository.load(2)).toEqual(imported)
+  })
+
+  it('migrates save v3 replay v2 UI outcomes to authoritative current schemas', () => {
+    const current = completedReplayCareer()
+    const replay = current.replayCheckpoint!
+    const legacyReplay = {
+      ...replay,
+      schemaVersion: 2,
+      commands: replay.commands.map((command, index) => {
+        if (index !== 0 || command.type !== 'gameplay/move-fielder') return command
+        const original = command.payload as {
+          mode: 'outfield'
+          x: number
+          z: number
+          sprint: boolean
+          catchAttempt?: boolean
+        }
+        const payload = { ...original }
+        delete payload.catchAttempt
+        return {
+          ...command,
+          payload: {
+            ...payload,
+            outcome: { success: true, runs: 0, outs: 0, summary: 'legacy presentation result' },
+          },
+        }
+      }),
+    }
+    const legacyCurrent = { ...current, schemaVersion: 3, replayCheckpoint: legacyReplay }
+    const body = { schemaVersion: 3, current: legacyCurrent, backup: null, backupChecksum: null }
+    const repository = new SaveRepository(new MemoryStorage())
+
+    const imported = repository.import(1, JSON.stringify({ ...body, checksum: stateHash(body) }))
+
+    expect(SAVE_SCHEMA_VERSION).toBe(4)
+    expect(REPLAY_SCHEMA_VERSION).toBe(3)
+    expect(imported.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(imported.current.schemaVersion).toBe(SAVE_SCHEMA_VERSION)
+    expect(imported.current.replayCheckpoint?.schemaVersion).toBe(REPLAY_SCHEMA_VERSION)
+    expect(imported.current.replayCheckpoint?.commands.every((command) => (
+      typeof command.payload !== 'object' || command.payload === null || !('outcome' in command.payload)
+    ))).toBe(true)
+    expect(repository.load(1)).toEqual(imported)
+  })
+
+  it('rebuilds legacy decision replays even when a decision had no UI outcome', () => {
+    const gameId = createCareerSchedule(42, 'seorin')[0]!.id
+    let oldState: MatchState = startMatch(createMatch({ id: gameId, seed: 42, innings: 1 })).state
+    oldState = reduceMatch(oldState, {
+      id: 1,
+      tick: 1,
+      type: 'gameplay/move-fielder',
+      payload: { mode: 'infield', x: 0, z: 1, sprint: true },
+    }).state
+    oldState = structuredClone(oldState)
+    const oldThrow = { id: 2, tick: 2, type: 'gameplay/throw-base', payload: { base: 2, accuracy: .86 } }
+    oldState.tick = 2
+    oldState.lastCommandId = 2
+    oldState.processedCommandIds.push(2)
+    oldState.replay.commands.push(oldThrow)
+    oldState.replay.checkpoints.push({
+      tick: oldState.tick,
+      stateHash: stateHash({ ...oldState, replay: undefined }),
+    })
+    const legacyReplay = { ...createReplayBundle(oldState, 'legacy-no-outcome'), schemaVersion: 2 }
+    const legacyCurrent = {
+      ...career({ phase: 'in-game', lastAppliedCommandId: 2 }),
+      schemaVersion: 3,
+      replayCheckpoint: legacyReplay,
+    }
+    const body = { schemaVersion: 3, current: legacyCurrent, backup: null, backupChecksum: null }
+    const repository = new SaveRepository(new MemoryStorage())
+
+    const imported = repository.import(1, JSON.stringify({ ...body, checksum: stateHash(body) }))
+
+    expect(imported.current.replayCheckpoint?.schemaVersion).toBe(REPLAY_SCHEMA_VERSION)
+    expect(imported.current.replayCheckpoint?.commands.at(-1)?.payload).toEqual({ base: 2, attempt: false })
+    expect(repository.load(1)).toEqual(imported)
+  })
+
+  it('preserves a legacy runner slide choice while marking its outcome as an attempt', () => {
+    const gameId = createCareerSchedule(42, 'seorin')[0]!.id
+    const started = startMatch(createMatch({ id: gameId, seed: 42, innings: 1 })).state
+    const decided = reduceMatch(started, {
+      id: 1,
+      tick: 1,
+      type: 'gameplay/runner-decision',
+      payload: { direction: 'hold', sprint: false, slide: false, attempt: true },
+    }).state
+    const replay = createReplayBundle(decided, 'legacy-runner')
+    const legacyReplay = {
+      ...replay,
+      schemaVersion: 2,
+      commands: replay.commands.map((command) => ({
+        ...command,
+        payload: {
+          direction: 'hold',
+          sprint: false,
+          slide: false,
+          outcome: { success: true, runs: 0, outs: 0, summary: 'legacy hold' },
+        },
+      })),
+    }
+    const legacyCurrent = {
+      ...career({ phase: 'in-game', lastAppliedCommandId: 1 }),
+      schemaVersion: 3,
+      replayCheckpoint: legacyReplay,
+    }
+    const body = { schemaVersion: 3, current: legacyCurrent, backup: null, backupChecksum: null }
+    const repository = new SaveRepository(new MemoryStorage())
+
+    const imported = repository.import(1, JSON.stringify({ ...body, checksum: stateHash(body) }))
+
+    expect(imported.current.replayCheckpoint?.commands[0]?.payload).toEqual({
+      direction: 'hold', sprint: false, slide: false, attempt: true,
+    })
   })
 
   it('rejects replay hash and exact-once cross-field mismatches on import', () => {
@@ -398,7 +532,20 @@ describe('SaveRepository', () => {
         ...valid,
         replayCheckpoint: {
           ...replay,
-          commands: replay.commands.map((command) => command.type === 'gameplay/runner-decision' ? { ...command, payload: { ...(command.payload as object), outcome: { success: true, runs: 'bad', outs: 0, summary: 'invalid' } } } : command),
+          commands: replay.commands.map((command) => command.type === 'gameplay/move-fielder' ? {
+            ...command,
+            payload: {
+              ...(command.payload as object),
+              outcome: { success: true, runs: 0, outs: 0, summary: 'current schema must reject UI outcomes' },
+            },
+          } : command),
+        },
+      },
+      {
+        ...valid,
+        replayCheckpoint: {
+          ...replay,
+          commands: replay.commands.map((command) => command.type === 'gameplay/move-fielder' ? { ...command, payload: { ...(command.payload as object), outcome: { success: true, runs: 'bad', outs: 0, summary: 'invalid' } } } : command),
         },
       },
     ] as CareerSave[]

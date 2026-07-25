@@ -1,4 +1,4 @@
-import type { GameplayCommand, GameplayDecisionOutcome, MatchEvent, MatchPhase, SceneTerminalResult } from '../../contracts'
+import type { GameplayCommand, MatchEvent, MatchPhase, SceneTerminalResult } from '../../contracts'
 import { canTransition, MATCH_TRANSITIONS } from '../../contracts'
 import { stateHash } from '../core/hash'
 import { deriveSeed, SeededRng } from '../core/rng'
@@ -42,10 +42,6 @@ function event<T extends MatchEvent['type']>(
 
 function battingSide(state: MatchState): TeamSide {
   return state.half === 'top' ? 'away' : 'home'
-}
-
-function opposingSide(side: TeamSide): TeamSide {
-  return side === 'home' ? 'away' : 'home'
 }
 
 function basesAdvancedBy(result: PlateResult): number {
@@ -166,38 +162,122 @@ function isSuccessfulSceneResult(scene: 'batting' | 'pitching', result: PlateRes
   return result === 'single' || result === 'double' || result === 'triple' || result === 'home-run' || result === 'walk'
 }
 
-function sceneForDecisionCommand(
-  command: Extract<GameplayCommand, { type: 'gameplay/move-fielder' | 'gameplay/throw-base' | 'gameplay/runner-decision' }>,
-): SceneTerminalResult['scene'] {
+type DecisionCommand = Extract<GameplayCommand, { type: 'gameplay/move-fielder' | 'gameplay/throw-base' | 'gameplay/runner-decision' }>
+
+interface DecisionResolution {
+  success: boolean
+  runs: number
+  outs: number
+  summary: string
+}
+
+function sceneForDecisionCommand(command: DecisionCommand): SceneTerminalResult['scene'] {
   if (command.type === 'gameplay/runner-decision') return 'baserunning'
   if (command.type === 'gameplay/move-fielder') return command.payload.mode
   return 'infield'
 }
 
-function applyDecisionOutcome(state: MatchState, command: Extract<GameplayCommand, { type: 'gameplay/move-fielder' | 'gameplay/throw-base' | 'gameplay/runner-decision' }>, outcome: GameplayDecisionOutcome): MatchEvent[] {
-  const scene = sceneForDecisionCommand(command)
-  if (command.type === 'gameplay/runner-decision') {
-    const occupied = state.bases.map((value, index) => value ? index : -1).filter((index) => index >= 0)
-    const lead = occupied.at(-1)
-    if (!outcome.success && lead !== undefined) {
-      const bases = [...state.bases] as boolean[]
-      bases[lead] = false
-      state.bases = bases as unknown as BaseState
-    } else if (outcome.success && command.payload.direction === 'advance' && lead !== undefined) {
-      const bases = [...state.bases] as boolean[]
-      bases[lead] = false
-      if (lead === 2) state.score[state.playerTeam] += 1
-      else bases[lead + 1] = true
-      state.bases = bases as unknown as BaseState
-    }
-    state.score[state.playerTeam] += outcome.runs
-  } else {
-    state.score[opposingSide(state.playerTeam)] += outcome.runs
+function clampUnit(value: number): number {
+  return Math.max(0, Math.min(1, value))
+}
+
+function decisionRoll(state: MatchState): number {
+  const rng = new SeededRng(state.rng.match.seed, state.rng.match.state)
+  const roll = rng.next()
+  state.rng.match = rng.snapshot()
+  return roll
+}
+
+function resetFielding(state: MatchState): void {
+  state.fielding = { mode: null, x: 0, z: 0, distance: 0, sprint: false, caught: false }
+}
+
+function updateFielderRoute(state: MatchState, command: Extract<DecisionCommand, { type: 'gameplay/move-fielder' }>): void {
+  if (state.fielding.mode !== command.payload.mode) resetFielding(state)
+  const step = Math.hypot(command.payload.x, command.payload.z) * (command.payload.sprint ? 1.35 : 1)
+  state.fielding = {
+    mode: command.payload.mode,
+    x: Math.max(-4, Math.min(4, state.fielding.x + command.payload.x)),
+    z: Math.max(-4, Math.min(4, state.fielding.z + command.payload.z)),
+    distance: Math.min(8, state.fielding.distance + step),
+    sprint: command.payload.sprint,
+    caught: state.fielding.caught,
   }
-  state.outs += outcome.outs
+}
+
+function resolveFielderCatch(state: MatchState, command: Extract<DecisionCommand, { type: 'gameplay/move-fielder' }>): DecisionResolution {
+  updateFielderRoute(state, command)
+  const sprintBonus = state.fielding.sprint ? .08 : 0
+  const baseChance = command.payload.mode === 'catcher' ? .9 : command.payload.mode === 'infield' ? .82 : .76
+  const success = decisionRoll(state) <= clampUnit(baseChance - state.fielding.distance * .055 + sprintBonus)
+  if (command.payload.mode === 'infield' && success) state.fielding.caught = true
+  return {
+    success,
+    runs: 0,
+    outs: 0,
+    summary: success
+      ? command.payload.mode === 'infield' ? '포구 성공 · 송구 베이스를 선택하세요' : '타구를 안정적으로 처리했습니다'
+      : '타구를 놓쳤습니다',
+  }
+}
+
+function resolveFielderThrow(state: MatchState, command: Extract<DecisionCommand, { type: 'gameplay/throw-base' }>): DecisionResolution {
+  if (!state.fielding.caught) {
+    return { success: false, runs: 0, outs: 0, summary: '포구하지 못해 송구할 수 없습니다' }
+  }
+  const expectedBase = state.lastPlay?.contact?.classification === 'ground' ? 1 : 2
+  const sprintBonus = state.fielding.sprint ? .04 : 0
+  const accurate = command.payload.base === expectedBase && decisionRoll(state) <= clampUnit(.88 - state.fielding.distance * .045 + sprintBonus)
+  return {
+    success: accurate,
+    runs: 0,
+    outs: 0,
+    summary: accurate ? `${command.payload.base}루 송구가 정확하게 연결됩니다` : `${command.payload.base}루 송구가 빗나갑니다`,
+  }
+}
+
+function resolveRunnerDecision(state: MatchState, command: Extract<DecisionCommand, { type: 'gameplay/runner-decision' }>): DecisionResolution {
+  const occupied = state.bases.map((value, index) => value ? index : -1).filter((index) => index >= 0)
+  const lead = occupied.at(-1)
+  if (lead === undefined || command.payload.direction === 'hold') {
+    return { success: true, runs: 0, outs: 0, summary: '베이스에서 다음 플레이를 기다립니다' }
+  }
+
+  const sprintBonus = command.payload.sprint ? .14 : 0
+  const slideBonus = command.payload.slide ? .08 : 0
+  const retreat = command.payload.direction === 'retreat'
+  const chance = clampUnit((retreat ? .78 : .57) + sprintBonus + slideBonus - lead * .035)
+  const success = decisionRoll(state) <= chance
+  const bases = [...state.bases] as boolean[]
+  bases[lead] = false
+  if (!success) {
+    state.bases = bases as unknown as BaseState
+    state.outs += 1
+    return { success: false, runs: 0, outs: 1, summary: retreat ? '귀루 중 태그 아웃' : '다음 베이스에서 태그 아웃' }
+  }
+  if (retreat) {
+    bases[Math.max(0, lead - 1)] = true
+    state.bases = bases as unknown as BaseState
+    return { success: true, runs: 0, outs: 0, summary: '안전하게 귀루했습니다' }
+  }
+  if (lead === 2) {
+    state.score[battingSide(state)] += 1
+    state.bases = bases as unknown as BaseState
+    return { success: true, runs: 1, outs: 0, summary: '과감한 주루로 득점합니다' }
+  }
+  bases[lead + 1] = true
+  state.bases = bases as unknown as BaseState
+  return { success: true, runs: 0, outs: 0, summary: '다음 베이스를 밟았습니다' }
+}
+
+function recordDecisionTerminal(state: MatchState, command: DecisionCommand, resolution: DecisionResolution): MatchEvent[] {
+  const scene = sceneForDecisionCommand(command)
   state.tick = Math.max(state.tick + 1, command.tick)
-  const payload = { id: `${state.id}:terminal:${command.id}`, scene, success: outcome.success, runs: outcome.runs, outs: outcome.outs, summary: outcome.summary }
-  const terminal: SceneTerminalResult = { ...payload, replayHash: stateHash({ ...payload, score: state.score, bases: state.bases, inning: state.inning, half: state.half }) }
+  const payload = { id: `${state.id}:terminal:${command.id}`, scene, ...resolution }
+  const terminal: SceneTerminalResult = {
+    ...payload,
+    replayHash: stateHash({ ...payload, score: state.score, bases: state.bases, inning: state.inning, half: state.half, rng: state.rng.match }),
+  }
   state.terminalIds.push(terminal.id)
   return [event(state, command.id, 'match/scene-terminal', terminal)]
 }
@@ -233,6 +313,7 @@ export function createMatch(config: MatchConfig): MatchState {
     terminalIds: [],
     playerPlateAppearances: 0,
     eventSequence: 0,
+    fielding: { mode: null, x: 0, z: 0, distance: 0, sprint: false, caught: false },
     replay: { initialCommandId, commands: [], events: [], checkpoints: [] },
   }
 }
@@ -311,8 +392,7 @@ export function reduceMatch(source: MatchState, command: GameplayCommand): Match
   if (state.processedCommandIds.includes(command.id)) return { state, events: [] }
   if (command.id <= state.lastCommandId) throw new Error(`Command id ${command.id} is not monotonic`)
   if (command.tick < state.tick) throw new Error(`Command tick ${command.tick} precedes state tick ${state.tick}`)
-  const presentationCommand = command.type === 'gameplay/move-fielder' || command.type === 'gameplay/throw-base' || command.type === 'gameplay/runner-decision'
-  if (state.phase === 'terminal' && !presentationCommand) return { state, events: [] }
+  if (state.phase === 'terminal') return { state, events: [] }
 
   const events: MatchEvent[] = []
   if (command.type === 'gameplay/pause') {
@@ -330,17 +410,33 @@ export function reduceMatch(source: MatchState, command: GameplayCommand): Match
     if (gameIsOver(state)) events.push(transition(state, 'terminal', command.id))
     else events.push(transition(state, 'live', command.id))
   } else if (command.type === 'gameplay/move-fielder' || command.type === 'gameplay/throw-base' || command.type === 'gameplay/runner-decision') {
-    if (state.phase !== 'live' && state.phase !== 'terminal') return { state, events }
-    if (command.payload.outcome) {
-      const wasTerminal = state.phase === 'terminal'
-      if (!wasTerminal) events.push(transition(state, 'resolving', command.id))
-      events.push(...applyDecisionOutcome(state, command, command.payload.outcome))
-      if (!wasTerminal && gameIsOver(state)) events.push(transition(state, 'terminal', command.id))
-      else if (!wasTerminal) {
-        advanceHalfIfNeeded(state)
-        events.push(transition(state, 'live', command.id))
+    if (state.phase !== 'live') return { state, events }
+    const resolvesCatch = command.type === 'gameplay/move-fielder' && command.payload.catchAttempt === true
+    const resolvesThrow = command.type === 'gameplay/throw-base' && command.payload.attempt
+    const resolvesRunner = command.type === 'gameplay/runner-decision' && command.payload.attempt
+    if (!resolvesCatch && !resolvesThrow && !resolvesRunner) {
+      if (command.type === 'gameplay/move-fielder') updateFielderRoute(state, command)
+      state.tick = Math.max(state.tick + 1, command.tick)
+    } else {
+      events.push(transition(state, 'resolving', command.id))
+      if (command.type === 'gameplay/move-fielder') {
+        const resolution = resolveFielderCatch(state, command)
+        if (command.payload.mode === 'infield' && resolution.success) {
+          state.tick = Math.max(state.tick + 1, command.tick)
+        } else {
+          events.push(...recordDecisionTerminal(state, command, resolution))
+          resetFielding(state)
+        }
+      } else if (command.type === 'gameplay/throw-base') {
+        events.push(...recordDecisionTerminal(state, command, resolveFielderThrow(state, command)))
+        resetFielding(state)
+      } else {
+        events.push(...recordDecisionTerminal(state, command, resolveRunnerDecision(state, command)))
       }
-    } else state.tick = Math.max(state.tick + 1, command.tick)
+      advanceHalfIfNeeded(state)
+      if (gameIsOver(state)) events.push(transition(state, 'terminal', command.id))
+      else events.push(transition(state, 'live', command.id))
+    }
   } else {
     return { state, events }
   }

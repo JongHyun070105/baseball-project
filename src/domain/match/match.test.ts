@@ -85,16 +85,16 @@ describe('deterministic match reducer', () => {
     expect(foul!.events.some((event) => event.type === 'match/scene-terminal')).toBe(false)
   })
 
-  it('applies and replays deterministic fielding and baserunning outcomes authoritatively', () => {
+  it('derives and replays fielding and baserunning results from raw intent', () => {
     let state = liveMatch(99)
     const commands: GameplayCommand[] = [
-      { id: 1, tick: 1, type: 'gameplay/move-fielder', payload: { mode: 'catcher', x: 0, z: 1, sprint: true, outcome: { success: true, runs: 0, outs: 1, summary: 'Pitch blocked and secured' } } },
-      { id: 2, tick: 2, type: 'gameplay/throw-base', payload: { base: 2, accuracy: .86, outcome: { success: true, runs: 0, outs: 1, summary: 'Ground ball retired at base 2' } } },
-      { id: 3, tick: 3, type: 'gameplay/runner-decision', payload: { direction: 'advance', sprint: true, slide: true, outcome: { success: true, runs: 1, outs: 0, summary: 'Runner advances safely' } } },
+      { id: 1, tick: 1, type: 'gameplay/move-fielder', payload: { mode: 'catcher', x: 0, z: 1, sprint: true, catchAttempt: true } },
+      { id: 2, tick: 2, type: 'gameplay/throw-base', payload: { base: 2, attempt: true } },
+      { id: 3, tick: 3, type: 'gameplay/runner-decision', payload: { direction: 'advance', sprint: true, slide: true, attempt: true } },
     ]
     for (const command of commands) state = reduceMatch(state, command).state
-    expect(state.outs).toBe(2)
-    expect(state.score.home).toBe(1)
+    expect(state.outs).toBe(0)
+    expect(state.score.home).toBe(0)
     expect(state.replay.commands.map((command) => command.type)).toEqual(commands.map((command) => command.type))
     expect(state.replay.checkpoints).toHaveLength(4)
     expect(state.terminalIds).toHaveLength(3)
@@ -105,7 +105,7 @@ describe('deterministic match reducer', () => {
     expect(replayed.outs).toBe(state.outs)
   })
 
-  it('advances an occupied authoritative base from a replayed runner outcome', () => {
+  it('advances an occupied authoritative base from a raw runner decision', () => {
     let seed = 1
     let state = liveMatch(seed)
     for (; seed <= 1_000; seed += 1) {
@@ -118,13 +118,144 @@ describe('deterministic match reducer', () => {
       id: 2,
       tick: 2,
       type: 'gameplay/runner-decision',
-      payload: { direction: 'advance', sprint: true, slide: true, outcome: { success: true, runs: 0, outs: 0, summary: 'Runner advances safely' } },
+      payload: { direction: 'advance', sprint: true, slide: true, attempt: true },
     }).state
     expect(state.bases).not.toEqual(before)
     const bundle = createReplayBundle(state, 'runner-base-test')
     const replayed = replayMatch({ id: 'fixture-game', seed, innings: 1 }, bundle)
     expect(replayed.bases).toEqual(state.bases)
     expect(replayed.score).toEqual(state.score)
+  })
+
+  it('ignores an injected UI outcome and only trusts raw player input', () => {
+    const raw: GameplayCommand = {
+      id: 1,
+      tick: 1,
+      type: 'gameplay/move-fielder',
+      payload: { mode: 'outfield', x: 0, z: 1, sprint: true, catchAttempt: true },
+    }
+    const injected = {
+      ...raw,
+      payload: {
+        ...raw.payload,
+        outcome: { success: true, runs: 99, outs: 99, summary: 'forged' },
+      },
+    } as unknown as GameplayCommand
+    const expected = reduceMatch(liveMatch(912), raw).state
+    const actual = reduceMatch(liveMatch(912), injected).state
+
+    expect(actual.score).toEqual(expected.score)
+    expect(actual.outs).toBe(expected.outs)
+    expect(actual.lastPlay).toEqual(expected.lastPlay)
+    expect(actual.terminalIds).toEqual(expected.terminalIds)
+  })
+
+  it('does not reapply score or outs while resolving a presentation fielding scene', () => {
+    let state: MatchState | undefined
+    for (let seed = 1; seed <= 2_000 && state === undefined; seed += 1) {
+      const candidate = reduceMatch(liveMatch(seed), {
+        id: 1,
+        tick: 1,
+        type: 'gameplay/swing',
+        payload: FIXTURE_SWING,
+      }).state
+      if (candidate.lastPlay?.terminal) state = candidate
+    }
+    expect(state, 'a deterministic completed plate appearance fixture').toBeDefined()
+    const beforeScore = structuredClone(state!.score)
+    const beforeOuts = state!.outs
+    const resolved = reduceMatch(state!, {
+      id: 2,
+      tick: state!.tick + 1,
+      type: 'gameplay/move-fielder',
+      payload: { mode: 'outfield', x: 0, z: 0, sprint: true, catchAttempt: true },
+    })
+    const terminal = resolved.events.find((entry) => entry.type === 'match/scene-terminal')
+
+    expect(resolved.state.score).toEqual(beforeScore)
+    expect(resolved.state.outs).toBe(beforeOuts)
+    expect(terminal?.payload.runs).toBe(0)
+    expect(terminal?.payload.outs).toBe(0)
+  })
+
+  it('authoritatively resolves infield catches before allowing a throw', () => {
+    let caught: MatchReduction | undefined
+    let missed: MatchReduction | undefined
+    for (let seed = 1; seed <= 2_000 && (!caught || !missed); seed += 1) {
+      const moved = reduceMatch(liveMatch(seed), {
+        id: 1,
+        tick: 1,
+        type: 'gameplay/move-fielder',
+        payload: { mode: 'infield', x: 0, z: 1, sprint: true },
+      }).state
+      const attempt = reduceMatch(moved, {
+        id: 2,
+        tick: 2,
+        type: 'gameplay/move-fielder',
+        payload: { mode: 'infield', x: 0, z: 0, sprint: true, catchAttempt: true },
+      })
+      const fielding = (attempt.state as MatchState & { fielding?: { caught: boolean } }).fielding
+      if (fielding?.caught) caught = attempt
+      if (attempt.events.some((event) => event.type === 'match/scene-terminal' && !event.payload.success)) missed = attempt
+    }
+
+    expect(caught, 'a deterministic successful infield catch').toBeDefined()
+    expect(caught!.events.some((event) => event.type === 'match/scene-terminal')).toBe(false)
+    expect(missed, 'a deterministic failed infield catch').toBeDefined()
+  })
+
+  it('keeps the accumulated fielding route when movement keys are released', () => {
+    const moved = reduceMatch(liveMatch(77), {
+      id: 1,
+      tick: 1,
+      type: 'gameplay/move-fielder',
+      payload: { mode: 'infield', x: 0, z: 1, sprint: true },
+    }).state
+    const released = reduceMatch(moved, {
+      id: 2,
+      tick: 2,
+      type: 'gameplay/move-fielder',
+      payload: { mode: 'infield', x: 0, z: 0, sprint: false },
+    }).state
+
+    expect(moved.fielding.distance).toBeGreaterThan(0)
+    expect(released.fielding.distance).toBe(moved.fielding.distance)
+    expect(released.fielding.z).toBe(moved.fielding.z)
+  })
+
+  it('commits non-sliding runner decisions explicitly', () => {
+    let seed = 1
+    let state = liveMatch(seed)
+    for (; seed <= 1_000; seed += 1) {
+      const candidate = reduceMatch(liveMatch(seed), { id: 1, tick: 1, type: 'gameplay/swing', payload: FIXTURE_SWING }).state
+      if (candidate.bases.some(Boolean)) { state = candidate; break }
+    }
+    const result = reduceMatch(state, {
+      id: 2,
+      tick: state.tick + 1,
+      type: 'gameplay/runner-decision',
+      payload: { direction: 'advance', sprint: true, slide: false, attempt: true },
+    } as unknown as GameplayCommand)
+
+    expect(result.events.some((event) => event.type === 'match/scene-terminal')).toBe(true)
+  })
+
+  it('keeps terminal score, bases, and outs immutable', () => {
+    const terminal = simulateAiGame(liveMatch(404)).state
+    const source = { ...terminal, bases: [false, false, true] as const }
+    const before = { score: structuredClone(source.score), bases: [...source.bases], outs: source.outs, final: stateHash({ ...source, replay: undefined }) }
+    const result = reduceMatch(source, {
+      id: source.lastCommandId + 1,
+      tick: source.tick + 1,
+      type: 'gameplay/runner-decision',
+      payload: { direction: 'advance', sprint: true, slide: true, attempt: true },
+    } as unknown as GameplayCommand)
+
+    expect(result.events).toEqual([])
+    expect(result.state.score).toEqual(before.score)
+    expect(result.state.bases).toEqual(before.bases)
+    expect(result.state.outs).toBe(before.outs)
+    expect(stateHash({ ...result.state, replay: undefined })).toBe(before.final)
   })
 
   it('replays a paused checkpoint as paused until an authoritative resume', () => {

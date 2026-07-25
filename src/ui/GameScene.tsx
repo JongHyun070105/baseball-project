@@ -136,9 +136,10 @@ function DynamicQuality({ onFactor }: { onFactor: (factor: number) => void }) {
 }
 
 const DEFENDERS: readonly [number, number, number][] = [
-  [-.8, 0, 1.4], [-6, 0, 8], [6, 0, 8], [0, 0, 14], [-11, 0, 13], [11, 0, 13],
-  [-16, 0, 23], [0, 0, 28], [16, 0, 23], [-4, 0, 5], [4, 0, 5], [-8, 0, 17],
-  [8, 0, 17], [-22, 0, 29], [22, 0, 29], [0, 0, 35],
+  [0, 0, 2.1], [-6, 0, 8], [6, 0, 8], [-5, 0, 13], [5, 0, 13],
+  [-16, 0, 23], [0, 0, 28], [16, 0, 23],
+  [-7, 0, -15], [-5, 0, -15], [-3, 0, -15], [-1, 0, -15],
+  [1, 0, -15], [3, 0, -15], [5, 0, -15], [7, 0, -15],
 ]
 
 function crowdCountForGraphics(graphics: GameSettings['graphics']): number {
@@ -237,7 +238,7 @@ function controlHints(mode: ActiveScene): { movementInput: string; movementActio
     return { movementInput: 'WASD · Shift', movementAction: '이동', playInput: 'Space · 1–4', playAction: '포구/송구' }
   }
   if (mode === 'baserunning') {
-    return { movementInput: 'W/S · Shift', movementAction: '주루', playInput: 'Space', playAction: '슬라이딩' }
+    return { movementInput: 'W/S · Shift', movementAction: '주루', playInput: 'Enter · Space', playAction: '결정/슬라이딩' }
   }
   if (mode === 'pitching') {
     return { movementInput: '마우스', movementAction: '조준', playInput: '클릭 유지·드래그·릴리스', playAction: '투구' }
@@ -313,7 +314,7 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
   const pitchingInputRef = useRef(new PitchingInputMapper())
   const fieldingInputRef = useRef(new FieldingInputMapper())
   const baserunningInputRef = useRef(new BaserunningInputMapper())
-  const fieldRouteRef = useRef({ x: 0, z: 0, sprint: false, caught: false })
+
 
   useEffect(() => {
     const query = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -332,18 +333,22 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
     pitchingInputRef.current.selectPitch(String(pitch))
     fieldingInputRef.current = new FieldingInputMapper()
     baserunningInputRef.current = new BaserunningInputMapper()
-    fieldRouteRef.current = { x: 0, z: 0, sprint: false, caught: false }
+
   }
   const recordAuthoritativeTerminal = (result: SceneTerminalResult) => {
     completedRef.current = [...completedRef.current, result]
     setTerminal(result)
     setFeedback(result.summary)
     playAudioCue(settings.masterVolume, result.success)
+    if (matchRef.current.phase === 'terminal') {
+      setPresentationComplete(true)
+      return
+    }
     if (result.scene === 'batting') setScene(result.success ? 'baserunning' : fieldingSceneFor(position as HitterPosition))
     else if (matchRef.current.half === 'top') setScene('pitching')
     else setPresentationComplete(true)
   }
-  const continueHitterLoop = () => {
+  const continueHitterLoop = (previousSummary?: string) => {
     if (completedRef.current.filter((scene) => scene.scene === 'batting').length >= 3) {
       setPresentationComplete(true)
       return
@@ -354,7 +359,7 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
     if (!onCheckpoint(state)) { setFeedback('다음 타석 체크포인트를 저장하지 못했습니다.'); return }
     matchRef.current = state
     setScene('batting')
-    setFeedback('팀 동료와 상대 공격이 끝났습니다. 다음 타석을 준비하세요.')
+    setFeedback(previousSummary ? `${previousSummary} · 다음 타석을 준비하세요.` : '팀 동료와 상대 공격이 끝났습니다. 다음 타석을 준비하세요.')
   }
   const recordPresentationTerminal = (result: SceneTerminalResult) => {
     completedRef.current = [...completedRef.current, result]
@@ -362,7 +367,7 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
     setFeedback(result.summary)
     playAudioCue(settings.masterVolume, result.success)
     if (result.scene === 'baserunning') setScene(fieldingSceneFor(position as HitterPosition))
-    else continueHitterLoop()
+    else continueHitterLoop(result.summary)
   }
   const commitMatchCommand = (type: GameplayCommand['type'], payload: GameplayCommand['payload']): MatchCommit | undefined => {
     const current = matchRef.current
@@ -440,40 +445,37 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
     if (!action || pausedRef.current) return
     if (action.type === 'move') {
       if (!commitMatchCommand('gameplay/move-fielder', { mode: modeRef.current as 'catcher' | 'infield' | 'outfield', x: action.x, z: action.z, sprint: action.sprint })) return
-      fieldRouteRef.current = { ...fieldRouteRef.current, x: action.x, z: action.z, sprint: action.sprint }
       setFeedback(action.sprint ? '전력으로 타구를 따라갑니다' : '타구 낙하지점으로 이동합니다')
     } else if (action.type === 'attempt-catch') {
-      fieldRouteRef.current.caught = true
-      const route = Math.hypot(fieldRouteRef.current.x, fieldRouteRef.current.z) * (fieldRouteRef.current.sprint ? 1.5 : 3)
-      if (modeRef.current === 'catcher' || modeRef.current === 'outfield') {
-        const local = modeRef.current === 'catcher'
-          ? (controllerRef.current as CatcherController).receive({ reactionSeconds: .22 + route * .03, gloveAccuracy: .9 - route * .03 })
-          : (controllerRef.current as OutfieldController).field({ routeDistance: route + 2, catchTiming: .9, throwAccuracy: .72 })
-        const committed = commitMatchCommand('gameplay/move-fielder', { mode: modeRef.current, x: fieldRouteRef.current.x, z: fieldRouteRef.current.z, sprint: fieldRouteRef.current.sprint, outcome: local })
-        if (committed?.terminal) recordPresentationTerminal(committed.terminal)
-        else if (!committed) setScene(modeRef.current)
-      } else {
-        if (!commitMatchCommand('gameplay/move-fielder', { mode: 'infield', x: fieldRouteRef.current.x, z: fieldRouteRef.current.z, sprint: fieldRouteRef.current.sprint })) return
-        setFeedback('포구 성공 · 1–4 키로 송구 베이스를 선택하세요')
-      }
+      const committed = commitMatchCommand('gameplay/move-fielder', {
+        mode: modeRef.current as 'catcher' | 'infield' | 'outfield',
+        x: 0,
+        z: 0,
+        sprint: matchRef.current.fielding.sprint,
+        catchAttempt: true,
+      })
+      if (committed?.terminal) recordPresentationTerminal(committed.terminal)
+      else if (!committed) setScene(modeRef.current)
+      else if (committed.state.fielding.caught) setFeedback('포구 성공 · 1–4 키로 송구 베이스를 선택하세요')
     } else if (modeRef.current === 'infield') {
-      const route = Math.hypot(fieldRouteRef.current.x, fieldRouteRef.current.z) * (fieldRouteRef.current.sprint ? 1.5 : 3)
-      const local = (controllerRef.current as InfieldController).field({ routeDistance: route + (fieldRouteRef.current.caught ? 1 : 6), catchTiming: fieldRouteRef.current.caught ? .9 : .4, throwBase: action.base, throwAccuracy: .86 })
-      const committed = commitMatchCommand('gameplay/throw-base', { base: action.base, accuracy: .86, outcome: local })
+      const committed = commitMatchCommand('gameplay/throw-base', { base: action.base, attempt: true })
       if (committed?.terminal) recordPresentationTerminal(committed.terminal)
       else if (!committed) setScene('infield')
     }
   }
   const resolveBaserunning = (key: string, keyUp = false) => {
-    const decision = keyUp ? baserunningInputRef.current.keyUp(key) : baserunningInputRef.current.keyDown(key)
+    const commitWithoutSlide = !keyUp && key === 'Enter'
+    const decision = commitWithoutSlide
+      ? baserunningInputRef.current.decision()
+      : keyUp ? baserunningInputRef.current.keyUp(key) : baserunningInputRef.current.keyDown(key)
     if (!decision || pausedRef.current) return
     setFeedback(runnerFeedback(decision.direction))
-    if (!keyUp && (key === ' ' || key === 'Space')) {
-      const local = (controllerRef.current as BaserunningController).run(decision)
-      const committed = commitMatchCommand('gameplay/runner-decision', { ...decision, outcome: local })
+    const attempt = commitWithoutSlide || (!keyUp && (key === ' ' || key === 'Space'))
+    if (attempt) {
+      const committed = commitMatchCommand('gameplay/runner-decision', { ...decision, attempt: true })
       if (committed?.terminal) recordPresentationTerminal(committed.terminal)
       else if (!committed) setScene('baserunning')
-    } else commitMatchCommand('gameplay/runner-decision', decision)
+    } else commitMatchCommand('gameplay/runner-decision', { ...decision, attempt: false })
   }
   const resolvePitch = (command: NonNullable<ReturnType<PitchingInputMapper['releaseGesture']>>) => {
     const factor = DIFFICULTY_FACTOR[settings.difficulty]
