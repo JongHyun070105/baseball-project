@@ -13,11 +13,18 @@ test('creates a pitcher, throws the selected pitch, and records the pitching res
   await expect(page.getByTestId(ids.finishGame)).toBeDisabled()
   const terminalIds = new Set<string>()
   for (let pitch = 0; pitch < 40 && await game.getAttribute('data-match-half') === 'top'; pitch += 1) {
-    await game.dispatchEvent('pointerdown', { clientX: 720, clientY: 450, button: 0, pointerType: 'mouse' })
-    await page.waitForTimeout(325)
-    await game.dispatchEvent('pointermove', { clientX: 900, clientY: 450, buttons: 1, pointerType: 'mouse' })
-    await page.waitForTimeout(325)
-    await game.dispatchEvent('pointerup', { clientX: 1044, clientY: 450, button: 0, pointerType: 'mouse' })
+    const scene = await game.getAttribute('data-scene')
+    if (scene === 'pitching') {
+      await game.dispatchEvent('pointerdown', { clientX: 720, clientY: 450, button: 0, pointerType: 'mouse' })
+      await page.waitForTimeout(325)
+      await game.dispatchEvent('pointermove', { clientX: 900, clientY: 450, buttons: 1, pointerType: 'mouse' })
+      await page.waitForTimeout(325)
+      await game.dispatchEvent('pointerup', { clientX: 1044, clientY: 450, button: 0, pointerType: 'mouse' })
+    } else if (scene === 'infield' || scene === 'outfield' || scene === 'catcher') {
+      await page.keyboard.press('Space')
+      await page.keyboard.press('2')
+      await page.waitForTimeout(100)
+    }
     const terminal = page.getByTestId('gameplay-terminal')
     if (await terminal.count()) terminalIds.add((await terminal.getAttribute('data-terminal-id'))!)
   }

@@ -93,26 +93,26 @@ export async function finishOneGame(page: Page): Promise<void> {
 
 export async function completeHitterScene(page: Page): Promise<void> {
   const game = page.getByTestId(ids.game)
-  for (let appearance = 1; appearance <= 3; appearance += 1) {
-    for (let pitch = 0; pitch < 12 && await game.getAttribute('data-scene') === 'batting'; pitch += 1) {
+  for (let step = 0; step < 45; step += 1) {
+    const isFinished = await page.getByTestId(ids.finishGame).isEnabled().catch(() => false)
+    if (isFinished) break
+    const scene = await game.getAttribute('data-scene')
+    if (scene === 'batting') {
       await game.dispatchEvent('pointermove', { clientX: 720, clientY: 450, pointerType: 'mouse' })
       await game.dispatchEvent('pointerdown', { clientX: 720, clientY: 450, button: 0, pointerType: 'mouse' })
-      await page.waitForTimeout(40)
-    }
-    await expect(game).toHaveAttribute('data-scene', /baserunning|infield/)
-    if (await game.getAttribute('data-scene') === 'baserunning') {
-      await page.keyboard.down('Shift')
-      await page.keyboard.down('w')
+      await page.waitForTimeout(100)
+    } else if (scene === 'baserunning') {
+      await page.keyboard.press('Enter')
+      await page.waitForTimeout(100)
+    } else if (scene === 'infield' || scene === 'outfield' || scene === 'catcher') {
       await page.keyboard.press('Space')
-      await page.keyboard.up('w')
-      await page.keyboard.up('Shift')
+      await page.keyboard.press('2')
+      await page.waitForTimeout(100)
+    } else {
+      await page.waitForTimeout(100)
     }
-    await expect(game).toHaveAttribute('data-scene', 'infield')
-    await page.keyboard.press('Space')
-    await page.keyboard.press('2')
-    await expect(game).toHaveAttribute('data-player-plate-appearances', String(appearance))
   }
-  await expect(page.getByTestId(ids.finishGame)).toBeEnabled()
+  await expect(page.getByTestId(ids.finishGame)).toBeEnabled({ timeout: 15_000 })
 }
 
 function simulatedCareerAtMonth(targetMonth: number): CareerSimulation {

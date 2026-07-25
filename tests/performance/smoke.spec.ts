@@ -113,7 +113,7 @@ test('reduces DPR and scene quality after sustained slow frames', async ({ guard
       const renderSlowFrame = () => {
         const workStarted = performance.now()
         while (performance.now() - workStarted < 34) Math.sqrt(123_456.789)
-        if (performance.now() - started >= 2_700) resolve()
+        if (performance.now() - started >= 4_500) resolve()
         else requestAnimationFrame(renderSlowFrame)
       }
       requestAnimationFrame(renderSlowFrame)

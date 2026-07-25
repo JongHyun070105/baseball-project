@@ -95,22 +95,116 @@ function Athlete({ position, uniform, pose = 'ready', scale = 1, animated = true
 }
 function Limb({ position, rotation, color }: { position: [number, number, number]; rotation: [number, number, number]; color: string }) { return <mesh position={position} rotation={rotation} castShadow><capsuleGeometry args={[.11, .55, 6, 8]} /><meshStandardMaterial color={color} /></mesh> }
 
-function Baseball({ state }: { state?: BallState }) {
-  const position: [number, number, number] = state
-    ? [state.position.x * .08, Math.max(.12, state.position.y * .08 + .12), 3 + state.position.z * .08]
-    : [0, .12, 3]
-  return <mesh position={position} visible={Boolean(state)} castShadow><sphereGeometry args={[.075, 20, 20]} /><meshStandardMaterial color="#fffaf0" roughness={.6} /></mesh>
+function Baseball({ state, mode }: { state?: BallState; mode: ActiveScene }) {
+  const ref = useRef<THREE.Mesh>(null)
+  useFrame(({ clock }) => {
+    if (!ref.current) return
+    if (state) {
+      ref.current.position.set(
+        state.position.x * 0.08,
+        Math.max(0.12, state.position.y * 0.08 + 0.12),
+        3 + state.position.z * 0.08
+      )
+    } else if (mode === 'batting' || mode === 'pitching') {
+      const progress = (clock.elapsedTime * 1.8) % 1
+      const pz = 8 - progress * 7.6
+      const py = 1.6 - Math.sin(progress * Math.PI) * 0.3
+      ref.current.position.set(0, py, pz)
+    } else {
+      ref.current.position.set(0, 0.12, 3)
+    }
+  })
+  return (
+    <mesh ref={ref} position={[0, 1.25, 0.4]} castShadow>
+      <sphereGeometry args={[0.085, 20, 20]} />
+      <meshStandardMaterial color="#ffffff" roughness={0.5} emissive="#fffaed" emissiveIntensity={0.15} />
+    </mesh>
+  )
 }
 
-function BroadcastCamera({ motionEnabled, shake }: { motionEnabled: boolean; shake: number }) {
+
+  function StrikeZone({ aim }: { aim: { x: number; y: number } }) {
+  const pciX = ((aim.x - 50) / 50) * 0.65
+  const pciY = 1.25 - ((aim.y - 50) / 50) * 0.55
+  return (
+    <group position={[0, 1.25, 0.4]}>
+      {/* 3D Strike Zone Grid Box */}
+      <lineSegments>
+        <edgesGeometry args={[new THREE.BoxGeometry(1.2, 1.4, 0.05)]} />
+        <lineBasicMaterial color="#e6c687" linewidth={2} transparent opacity={0.65} />
+      </lineSegments>
+      <mesh position={[0, 0, 0]}>
+        <planeGeometry args={[1.2, 1.4]} />
+        <meshBasicMaterial color="#fcd34d" transparent opacity={0.08} side={THREE.DoubleSide} />
+      </mesh>
+      {/* Target PCI Ring */}
+      <group position={[pciX, pciY - 1.25, 0.08]}>
+        <mesh>
+          <ringGeometry args={[0.08, 0.11, 32]} />
+          <meshBasicMaterial color="#f59e0b" transparent opacity={0.9} side={THREE.DoubleSide} />
+        </mesh>
+        <mesh>
+          <circleGeometry args={[0.025, 16]} />
+          <meshBasicMaterial color="#ef4444" transparent opacity={0.95} />
+        </mesh>
+      </group>
+    </group>
+  )
+}
+
+function BroadcastCamera({ mode, motionEnabled, shake, ballState }: { mode: ActiveScene; motionEnabled: boolean; shake: number; ballState?: BallState }) {
   const { camera } = useThree()
+
   useFrame(({ clock, pointer }) => {
-    const impact = motionEnabled ? Math.sin(clock.elapsedTime * 38) * shake * .08 : 0
-    const tx = 7.8 + (motionEnabled ? pointer.x * .25 : 0) + impact
-    const ty = 4 + (motionEnabled ? pointer.y * .12 : 0) + impact * .4
-    camera.position.x += (tx - camera.position.x) * .025
-    camera.position.y += (ty - camera.position.y) * .025
-    camera.lookAt(0, 1.5, 3)
+    const impact = motionEnabled ? Math.sin(clock.elapsedTime * 38) * shake * 0.08 : 0
+    let targetX = 0
+    let targetY = 2.0
+    let targetZ = -0.6
+    let lookX = 0
+    let lookY = 1.3
+    let lookZ = 16
+
+    if (mode === 'batting') {
+      // MLB The Show Behind-the-batter camera
+      targetX = 0.0 + (motionEnabled ? pointer.x * 0.2 : 0) + impact
+      targetY = 2.5 + (motionEnabled ? pointer.y * 0.1 : 0) + impact * 0.4
+      targetZ = -2.2
+      lookX = 0.0
+      lookY = 1.35
+      lookZ = 16
+    } else if (mode === 'pitching') {
+      // Behind-the-pitcher camera
+      targetX = 0.0 + (motionEnabled ? pointer.x * 0.3 : 0) + impact
+      targetY = 2.4 + (motionEnabled ? pointer.y * 0.15 : 0)
+      targetZ = 16
+      lookX = 0.0
+      lookY = 1.0
+      lookZ = 0
+    } else if (ballState) {
+      // Dynamic Ball Tracking Broadcast Camera
+      const bx = ballState.position.x * 0.08
+      const by = Math.max(0.12, ballState.position.y * 0.08 + 0.12)
+      const bz = 3 + ballState.position.z * 0.08
+      targetX = bx * 0.5 + 6.0
+      targetY = 8.0 + by * 0.4
+      targetZ = bz * 0.5 + 4.0
+      lookX = bx
+      lookY = by
+      lookZ = bz
+    } else {
+      // Infield/Outfield default broadcast tracking
+      targetX = 6.5
+      targetY = 4.5
+      targetZ = 3.5
+      lookX = 0
+      lookY = 1.5
+      lookZ = 6
+    }
+
+    camera.position.x += (targetX - camera.position.x) * 0.06
+    camera.position.y += (targetY - camera.position.y) * 0.06
+    camera.position.z += (targetZ - camera.position.z) * 0.06
+    camera.lookAt(lookX, lookY, lookZ)
   })
   return null
 }
@@ -149,7 +243,7 @@ function crowdCountForGraphics(graphics: GameSettings['graphics']): number {
     case 'medium':
       return 500
     case 'low':
-      return 250
+      return 200
   }
 }
 
@@ -164,7 +258,7 @@ function dprForGraphics(graphics: GameSettings['graphics']): number {
   }
 }
 
-function GameWorld({ paused, ballState, graphics, motionEnabled, cameraShake }: { paused: boolean; ballState?: BallState; graphics: GameSettings['graphics']; motionEnabled: boolean; cameraShake: number }) {
+function GameWorld({ mode, paused, ballState, graphics, motionEnabled, cameraShake, aim }: { mode: ActiveScene; paused: boolean; ballState?: BallState; graphics: GameSettings['graphics']; motionEnabled: boolean; cameraShake: number; aim: { x: number; y: number } }) {
   const crowdCount = crowdCountForGraphics(graphics)
   return <>
     <color attach="background" args={['#07131f']} /><fog attach="fog" args={['#0b1b29', 35, 86]} />
@@ -175,9 +269,18 @@ function GameWorld({ paused, ballState, graphics, motionEnabled, cameraShake }: 
     <Physics gravity={[0, -9.81, 0]} timeStep={1 / 120} paused={paused}>
       <RigidBody type="fixed" colliders="cuboid"><mesh position={[0, -.15, 10]} visible={false}><boxGeometry args={[110, .2, 110]} /><meshBasicMaterial transparent opacity={0} /></mesh></RigidBody>
     </Physics>
-    <Stadium crowdCount={crowdCount} /><Athlete position={[0, 0, 1.1]} uniform="#142f4c" pose="batting" scale={1.08} animated={motionEnabled && !paused} /><Athlete position={[0, 0, 8]} uniform="#72202a" pose="pitching" animated={motionEnabled && !paused} />
+    <Stadium crowdCount={crowdCount} />
+    {/* Hitter at Batter Box */}
+    <Athlete position={[0.72, 0, 0.4]} uniform="#142f4c" pose="batting" scale={1.05} animated={motionEnabled && !paused} />
+    {/* Catcher behind Home Plate */}
+    <Athlete position={[0, 0, -1.1]} uniform="#72202a" pose="ready" scale={0.95} animated={motionEnabled && !paused} />
+    {/* Pitcher on Pitching Mound */}
+    <Athlete position={[0, 0, 8]} uniform="#72202a" pose="pitching" animated={motionEnabled && !paused} />
     {DEFENDERS.map((defender, index) => <Athlete key={index} position={defender} uniform="#72202a" scale={graphics === 'low' && index > 8 ? .82 : 1} animated={motionEnabled && !paused} />)}
-    <Baseball state={ballState} /><ContactShadows position={[0, .09, 3]} opacity={.45} scale={18} blur={2.4} far={8} /><BroadcastCamera motionEnabled={motionEnabled} shake={cameraShake} />
+    <Baseball state={ballState} mode={mode} />
+    {mode === 'batting' && <StrikeZone aim={aim} />}
+    <ContactShadows position={[0, .09, 3]} opacity={.45} scale={18} blur={2.4} far={8} />
+    <BroadcastCamera mode={mode} motionEnabled={motionEnabled} shake={cameraShake} ballState={ballState} />
   </>
 }
 
@@ -558,7 +661,7 @@ export function GameScene({ role, position, settings, match, onCheckpoint, onFin
       aimRef.current = nextAim; setAim(nextAim)
       if (modeRef.current === 'pitching' && event.buttons === 1) pitchingInputRef.current.updateGesture((nextAim.x - 50) / 50, (nextAim.y - 50) / 50, event.timeStamp)
     }}>
-    <div className="game-canvas" aria-label="3D 야구 경기장"><Canvas dpr={effectiveDpr} shadows={settings.graphics !== 'low'} camera={{ position: [7.8, 4, -8.8], fov: 44 }} gl={{ antialias: settings.graphics !== 'low', powerPreference: 'high-performance' }}><DynamicQuality onFactor={setQualityFactor} /><GameWorld paused={paused} ballState={authoritativeBall} graphics={sceneQuality} motionEnabled={motionEnabled} cameraShake={terminal && motionEnabled ? settings.cameraShake : 0} /></Canvas></div>
+    <div className="game-canvas" aria-label="3D 야구 경기장"><Canvas dpr={effectiveDpr} shadows={settings.graphics !== 'low'} camera={{ position: [0, 2.0, -0.6], fov: 50 }} gl={{ antialias: settings.graphics !== 'low', powerPreference: 'high-performance' }}><DynamicQuality onFactor={setQualityFactor} /><GameWorld mode={mode} aim={aim} paused={paused} ballState={authoritativeBall} graphics={sceneQuality} motionEnabled={motionEnabled} cameraShake={terminal && motionEnabled ? settings.cameraShake : 0} /></Canvas></div>
     <div className="scorebug" data-testid="authoritative-score"><div className="scorebug__inning"><span>{matchRef.current.inning}</span><small>{matchRef.current.half === 'top' ? '초' : '말'}</small></div><div className="scorebug__teams"><p><i className="team-dot team-dot--away" />원정 <strong data-testid="away-score">{matchRef.current.score.away}</strong></p><p><i className="team-dot team-dot--home" />우리 팀 <strong data-testid="home-score">{matchRef.current.score.home}</strong></p></div><div className="scorebug__count"><p><span>B</span>{[0, 1, 2, 3].map((value) => <i key={value} className={value < matchRef.current.balls ? 'is-on' : ''} />)}</p><p><span>S</span>{[0, 1, 2].map((value) => <i key={value} className={value < matchRef.current.strikes ? 'is-on' : ''} />)}</p><p><span>O</span>{[0, 1].map((value) => <i key={value} className={value < matchRef.current.outs ? 'is-on' : ''} />)}</p></div><div className="base-diamond">{matchRef.current.bases.map((occupied, index) => <i key={index} className={occupied ? 'is-on' : ''} />)}</div></div>
     <div className="broadcast-tag"><span>LIVE</span> {broadcastLabel(mode, position)} · PLAY {completedRef.current.length + 1}</div>
     <div className="aim-reticle" style={{ left: `${aim.x}%`, top: `${aim.y}%` }} aria-hidden="true"><span /><i /></div>
